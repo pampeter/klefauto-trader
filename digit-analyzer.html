@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Digit Analyzer</title>
+<style>
+:root{--bg:#0e1a1f;--panel:#16262d;--line:#27404a;--text:#e8f0ec;--mute:#8fa7ad;--hi:#f2b84b;--lo:#5fc7d1;--bar:#3a5964}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:16px;max-width:560px;margin-inline:auto}
+h1{font-size:1.25rem;margin:0 0 2px}
+.sub{color:var(--mute);font-size:.85rem;margin:0 0 14px}
+.row{display:flex;gap:8px;margin-bottom:12px}
+select{flex:1;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:1rem}
+.seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{background:var(--panel);color:var(--mute);border:0;padding:10px 12px;font-size:.9rem}
+.seg button.on{background:var(--line);color:var(--text)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.now{display:flex;align-items:center;gap:16px}
+.big{font-size:4rem;line-height:1;font-weight:700;min-width:1ch}
+.meta{color:var(--mute);font-size:.9rem}
+.meta b{color:var(--text);font-weight:600}
+.status{font-size:.8rem;color:var(--mute)}
+.status.ok{color:var(--lo)}
+.bars{display:grid;grid-template-columns:repeat(10,1fr);gap:6px;align-items:end;height:170px}
+.col{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;gap:4px}
+.fill{width:100%;background:var(--bar);border-radius:4px 4px 0 0;min-height:2px;transition:height .15s}
+.col.hi .fill{background:var(--hi)}.col.lo .fill{background:var(--lo)}
+.col.cur{outline:2px solid var(--text);outline-offset:2px;border-radius:4px}
+.d{font-weight:600}.p{font-size:.68rem;color:var(--mute)}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:.9rem}
+.stats div{color:var(--mute)}.stats b{color:var(--text);display:block;font-size:1.05rem}
+.note{font-size:.78rem;color:var(--mute)}
+button:focus-visible,select:focus-visible{outline:2px solid var(--hi);outline-offset:2px}
+</style>
+</head>
+<body>
+<h1>Live digit analyzer</h1>
+<p class="sub">Last-digit frequency from live Deriv ticks.</p>
+
+<div class="row">
+  <select id="mkt" aria-label="Market"></select>
+  <div class="seg" id="win" role="group" aria-label="Tick window">
+    <button data-n="100">100</button><button data-n="500">500</button><button data-n="1000" class="on">1000</button>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="now">
+    <div class="big" id="last">–</div>
+    <div class="meta">
+      <div>Price <b id="price">–</b></div>
+      <div>Streak <b id="streak">–</b></div>
+      <div class="status" id="status">Connecting…</div>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="bars" id="bars"></div>
+</div>
+
+<div class="panel stats">
+  <div>Most frequent<b id="mostD">–</b></div>
+  <div>Least frequent<b id="leastD">–</b></div>
+  <div>Even / Odd<b id="eo">–</b></div>
+  <div>Over 4 / Under 5<b id="ou">–</b></div>
+</div>
+
+<p class="note">Statistics only, not a prediction. Deriv synthetic indices use random number generators, so each digit stays independent and the next digit cannot be forecast. Frequencies in a short window drift by chance.</p>
+
+<script>
+(function(){
+  var MARKETS=[["R_10","Volatility 10"],["R_25","Volatility 25"],["R_50","Volatility 50"],["R_75","Volatility 75"],["R_100","Volatility 100"],
+    ["1HZ10V","Volatility 10 (1s)"],["1HZ15V","Volatility 15 (1s)"],["1HZ25V","Volatility 25 (1s)"],["1HZ30V","Volatility 30 (1s)"],
+    ["1HZ50V","Volatility 50 (1s)"],["1HZ75V","Volatility 75 (1s)"],["1HZ90V","Volatility 90 (1s)"],["1HZ100V","Volatility 100 (1s)"]];
+  var URL="wss://ws.derivws.com/websockets/v3?app_id=1089";
+  var $=function(id){return document.getElementById(id)};
+  var sel=$("mkt"),bars=$("bars"),statusEl=$("status");
+  var sym=MARKETS[4][0],win=1000,digits=[],pip=2,ws=null,retry=null;
+
+  MARKETS.forEach(function(m){var o=document.createElement("option");o.value=m[0];o.textContent=m[1];sel.appendChild(o)});
+  sel.value=sym;
+
+  var cols=[];
+  for(var i=0;i<10;i++){
+    var c=document.createElement("div");c.className="col";
+    c.innerHTML='<div class="p"></div><div class="fill"></div><div class="d">'+i+'</div>';
+    bars.appendChild(c);cols.push(c);
+  }
+
+  function lastDigit(q){var s=Number(q).toFixed(pip);return +s.charAt(s.length-1)}
+  function setStatus(t,ok){statusEl.textContent=t;statusEl.className="status"+(ok?" ok":"")}
+
+  function render(){
+    var w=digits.slice(-win),n=w.length,cnt=new Array(10).fill(0);
+    w.forEach(function(d){cnt[d]++});
+    var max=Math.max.apply(null,cnt),min=Math.min.apply(null,cnt);
+    var cur=n?w[n-1]:-1;
+    for(var i=0;i<10;i++){
+      var pct=n?cnt[i]/n*100:0;
+      cols[i].querySelector(".p").textContent=n?pct.toFixed(1)+"%":"";
+      cols[i].querySelector(".fill").style.height=(max?cnt[i]/max*100*0.78:0)+"%";
+      cols[i].className="col"+(n&&cnt[i]===max?" hi":"")+(n&&cnt[i]===min?" lo":"")+(i===cur?" cur":"");
+    }
+    if(!n)return;
+    var hi=[],lo=[];cnt.forEach(function(v,i){if(v===max)hi.push(i);if(v===min)lo.push(i)});
+    $("mostD").textContent=hi.join(", ")+" ("+(max/n*100).toFixed(1)+"%)";
+    $("leastD").textContent=lo.join(", ")+" ("+(min/n*100).toFixed(1)+"%)";
+    var ev=w.filter(function(d){return d%2===0}).length;
+    $("eo").textContent=(ev/n*100).toFixed(0)+"% / "+((n-ev)/n*100).toFixed(0)+"%";
+    var ov=w.filter(function(d){return d>4}).length;
+    $("ou").textContent=(ov/n*100).toFixed(0)+"% / "+((n-ov)/n*100).toFixed(0)+"%";
+    var s=1;while(s<n&&w[n-1-s]===cur)s++;
+    $("streak").textContent=s+"× "+cur;
+    $("last").textContent=cur;
+  }
+
+  function connect(){
+    clearTimeout(retry);
+    if(ws){ws.onclose=null;try{ws.close()}catch(e){}}
+    setStatus("Connecting…");
+    ws=new WebSocket(URL);
+    ws.onopen=function(){subscribe()};
+    ws.onmessage=function(e){
+      var m=JSON.parse(e.data);
+      if(m.error){setStatus("Error: "+m.error.message);return}
+      if(m.msg_type==="history"&&m.echo_req.ticks_history===sym){
+        pip=m.pip_size||2;
+        digits=m.history.prices.map(lastDigit);
+        setStatus("Live",true);render();
+      }else if(m.msg_type==="tick"&&m.tick&&m.tick.symbol===sym){
+        pip=m.tick.pip_size||pip;
+        digits.push(lastDigit(m.tick.quote));
+        if(digits.length>1000)digits.shift();
+        $("price").textContent=Number(m.tick.quote).toFixed(pip);
+        render();
+      }
+    };
+    ws.onclose=function(){setStatus("Disconnected. Reconnecting…");retry=setTimeout(connect,2000)};
+    ws.onerror=function(){try{ws.close()}catch(e){}};
+  }
+
+  function subscribe(){
+    digits=[];render();$("last").textContent="–";$("streak").textContent="–";$("price").textContent="–";
+    setStatus("Loading ticks…");
+    ws.send(JSON.stringify({forget_all:"ticks"}));
+    ws.send(JSON.stringify({ticks_history:sym,adjust_start_time:1,count:1000,end:"latest",style:"ticks",subscribe:1}));
+  }
+
+  sel.onchange=function(){sym=sel.value;if(ws&&ws.readyState===1)subscribe()};
+  $("win").onclick=function(e){
+    var b=e.target.closest("button");if(!b)return;
+    win=+b.dataset.n;
+    [].forEach.call($("win").children,function(x){x.classList.toggle("on",x===b)});
+    render();
+  };
+  connect();
+})();
+</script>
+</body>
+</html>
